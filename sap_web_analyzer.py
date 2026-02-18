@@ -1,14 +1,27 @@
 import ast
 import calendar
 import re
+from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 HORAS_TEORICAS_DIA = 8.0
+
+
+NOMBRES_DIAS_ES = {
+    0: "Lunes",
+    1: "Martes",
+    2: "Miércoles",
+    3: "Jueves",
+    4: "Viernes",
+    5: "Sábado",
+    6: "Domingo",
+}
 
 st.set_page_config(
     page_title="Panel de Control Horas SAP",
@@ -60,7 +73,7 @@ def extraer_fecha_ics(valor):
 
 
 def cargar_festivos_ics(base_path="."):
-    festivos = set()
+    festivos = defaultdict(set)
     archivos = sorted(Path(base_path).glob("*.ics"))
 
     for archivo in archivos:
@@ -77,12 +90,23 @@ def cargar_festivos_ics(base_path="."):
                 lineas_unidas.append(linea)
 
         dentro_evento = False
+        fecha_evento = None
+        nombre_evento = None
+
         for linea in lineas_unidas:
             if linea.startswith("BEGIN:VEVENT"):
                 dentro_evento = True
+                fecha_evento = None
+                nombre_evento = None
                 continue
             if linea.startswith("END:VEVENT"):
+                if fecha_evento and nombre_evento:
+                    festivos[fecha_evento].add(nombre_evento)
+                elif fecha_evento:
+                    festivos[fecha_evento].add("Festivo")
                 dentro_evento = False
+                fecha_evento = None
+                nombre_evento = None
                 continue
 
             if dentro_evento and linea.startswith("DTSTART"):
@@ -92,9 +116,103 @@ def cargar_festivos_ics(base_path="."):
                     continue
                 fecha = extraer_fecha_ics(valor)
                 if fecha:
-                    festivos.add(fecha)
+                    fecha_evento = fecha
 
-    return festivos, [archivo.name for archivo in archivos]
+            if dentro_evento and linea.startswith("SUMMARY"):
+                try:
+                    nombre_evento = linea.split(":", maxsplit=1)[1].strip()
+                except IndexError:
+                    nombre_evento = "Festivo"
+
+    return dict(festivos), [archivo.name for archivo in archivos]
+
+
+def construir_calendario_interactivo(year, month, festivos_ics, dias_info):
+    cal = calendar.Calendar(firstweekday=0)
+    semanas = cal.monthdayscalendar(year, month)
+
+    z_valores = []
+    textos = []
+    hover_textos = []
+
+    for semana in semanas:
+        z_fila = []
+        text_fila = []
+        hover_fila = []
+
+        for dia in semana:
+            if dia == 0:
+                z_fila.append(None)
+                text_fila.append("")
+                hover_fila.append("")
+                continue
+
+            fecha = date(year, month, dia)
+            es_festivo = fecha in festivos_ics
+            es_fin_semana = fecha.weekday() >= 5
+            info_dia = dias_info.get(fecha, {})
+            horas = info_dia.get("Horas reales", 0)
+
+            if es_festivo:
+                estado = 3
+                icono = "🎉"
+            elif es_fin_semana:
+                estado = 1
+                icono = "🛌"
+            elif horas > 0:
+                estado = 2
+                icono = "✅"
+            else:
+                estado = 0
+                icono = ""
+
+            festivos_txt = ", ".join(sorted(festivos_ics.get(fecha, []))) or "Sin festivo"
+            text_fila.append(f"{dia}<br><span style='font-size:11px'>{icono}</span>")
+
+            hover_fila.append(
+                "<br>".join([
+                    f"<b>{NOMBRES_DIAS_ES[fecha.weekday()]} {fecha.strftime('%d/%m/%Y')}</b>",
+                    f"Horas reales: {horas:.2f}",
+                    f"Festivos: {festivos_txt}",
+                ])
+            )
+            z_fila.append(estado)
+
+        z_valores.append(z_fila)
+        textos.append(text_fila)
+        hover_textos.append(hover_fila)
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z_valores,
+            x=["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"],
+            y=[f"Semana {i + 1}" for i in range(len(semanas))],
+            text=textos,
+            customdata=hover_textos,
+            hovertemplate="%{customdata}<extra></extra>",
+            colorscale=[
+                [0.0, "#F4F6FB"],
+                [0.25, "#DFE7FD"],
+                [0.5, "#C7F9CC"],
+                [0.75, "#FFD6A5"],
+                [1.0, "#FFADAD"],
+            ],
+            showscale=False,
+            xgap=6,
+            ygap=6,
+        )
+    )
+
+    fig.update_traces(texttemplate="%{text}")
+    fig.update_layout(
+        height=430,
+        margin=dict(l=10, r=10, t=20, b=10),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        yaxis_autorange="reversed",
+    )
+
+    return fig
 
 
 def parsear_sap(texto):
@@ -146,37 +264,6 @@ def parsear_sap(texto):
                 dias[fecha]["fichajes"].append((entrada, salida))
 
     return dias
-
-
-def construir_calendario_visual(year, month, festivos_ics, dias_trabajados):
-    cal = calendar.Calendar(firstweekday=0)
-    semanas = cal.monthdayscalendar(year, month)
-    filas = []
-
-    for semana in semanas:
-        fila = []
-        for dia in semana:
-            if dia == 0:
-                fila.append("")
-                continue
-
-            fecha = date(year, month, dia)
-            marcas = []
-
-            if fecha in festivos_ics:
-                marcas.append("🎉")
-            if fecha.weekday() >= 5:
-                marcas.append("🛌")
-            if fecha in dias_trabajados:
-                marcas.append("✅")
-
-            fila.append(f"{dia:02d} {' '.join(marcas)}".strip())
-        filas.append(fila)
-
-    return pd.DataFrame(
-        filas,
-        columns=["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
-    )
 
 
 festivos_ics, archivos_ics = cargar_festivos_ics()
@@ -236,7 +323,7 @@ with st.container(border=True):
             value="17:00"
         )
 
-    if st.button("➕ Añadir fichaje", use_container_width=True):
+    if st.button("➕ Añadir fichaje", width='stretch'):
 
         try:
             hora_entrada = datetime.strptime(hora_entrada_txt, "%H:%M").time()
@@ -304,7 +391,7 @@ if st.session_state["dias"]:
 
     df_editado = st.data_editor(
         df,
-        use_container_width=True,
+        width='stretch',
         key="editor"
     )
 
@@ -369,7 +456,7 @@ if st.session_state["dias"]:
     )
 
     st.subheader("📅 Resumen mensual")
-    st.dataframe(resumen_mensual, use_container_width=True)
+    st.dataframe(resumen_mensual, width='stretch')
 
     resumen_semanal = df_final.groupby("Semana")["Diferencia"].sum().reset_index()
 
@@ -381,7 +468,7 @@ if st.session_state["dias"]:
         color="Diferencia",
         color_continuous_scale="RdYlGn"
     )
-    st.plotly_chart(fig_semana, use_container_width=True)
+    st.plotly_chart(fig_semana, width='stretch')
 
     st.subheader("📊 Balance mensual")
     fig_mes = px.bar(
@@ -391,7 +478,7 @@ if st.session_state["dias"]:
         color="Diferencia",
         color_continuous_scale="RdYlGn"
     )
-    st.plotly_chart(fig_mes, use_container_width=True)
+    st.plotly_chart(fig_mes, width='stretch')
 
     st.subheader("🕒 Horas extraordinarias por mes")
     fig_extra = px.bar(
@@ -401,7 +488,7 @@ if st.session_state["dias"]:
         color="Horas extraordinarias",
         color_continuous_scale="Blues"
     )
-    st.plotly_chart(fig_extra, use_container_width=True)
+    st.plotly_chart(fig_extra, width='stretch')
 
     st.subheader("📉 Evolución acumulada")
     fig_acum = px.line(
@@ -410,7 +497,7 @@ if st.session_state["dias"]:
         y="Acumulado",
         markers=True
     )
-    st.plotly_chart(fig_acum, use_container_width=True)
+    st.plotly_chart(fig_acum, width='stretch')
 
     st.divider()
     st.subheader("🗓️ Visor de calendario")
@@ -423,11 +510,55 @@ if st.session_state["dias"]:
         f"{year}-{month:02d}": (year, month)
         for year, month in meses_disponibles
     }
-    mes_sel_txt = st.selectbox("Mes a visualizar", list(opciones.keys()), index=len(opciones) - 1)
-    year_sel, month_sel = opciones[mes_sel_txt]
+    meses_keys = list(opciones.keys())
 
-    dias_trabajados = set(df_final.loc[df_final["Horas reales"] > 0, "Fecha"])
-    calendario_df = construir_calendario_visual(year_sel, month_sel, festivos_ics, dias_trabajados)
+    if "cal_mes_index" not in st.session_state:
+        st.session_state["cal_mes_index"] = len(meses_keys) - 1
 
-    st.caption("Leyenda: 🎉 Festivo .ics · 🛌 Fin de semana · ✅ Día con fichajes")
-    st.table(calendario_df)
+    st.session_state["cal_mes_index"] = max(
+        0,
+        min(st.session_state["cal_mes_index"], len(meses_keys) - 1)
+    )
+
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 4, 1])
+    with nav_col1:
+        if st.button("⬅️ Mes anterior", width='stretch'):
+            st.session_state["cal_mes_index"] = max(0, st.session_state["cal_mes_index"] - 1)
+            st.rerun()
+    with nav_col2:
+        mes_sel_txt = st.selectbox(
+            "Mes a visualizar",
+            meses_keys,
+            index=st.session_state["cal_mes_index"],
+            key="cal_mes_selector",
+        )
+        st.session_state["cal_mes_index"] = meses_keys.index(mes_sel_txt)
+    with nav_col3:
+        if st.button("Mes siguiente ➡️", width='stretch'):
+            st.session_state["cal_mes_index"] = min(len(meses_keys) - 1, st.session_state["cal_mes_index"] + 1)
+            st.rerun()
+
+    year_sel, month_sel = opciones[meses_keys[st.session_state["cal_mes_index"]]]
+
+    dias_info = df_final.set_index("Fecha")[["Horas reales"]].to_dict("index")
+    calendario_fig = construir_calendario_interactivo(year_sel, month_sel, festivos_ics, dias_info)
+
+    st.caption("Leyenda: 🎉 Festivo .ics · 🛌 Fin de semana · ✅ Día con fichajes · Hover para ver detalles y nombre del festivo")
+    st.plotly_chart(calendario_fig, width='stretch')
+
+    festivos_mes = {
+        fecha: nombres
+        for fecha, nombres in festivos_ics.items()
+        if fecha.year == year_sel and fecha.month == month_sel
+    }
+
+    if festivos_mes:
+        st.markdown("**Festivos del mes (ICS):**")
+        festivos_df = pd.DataFrame([
+            {
+                "Fecha": fecha.strftime("%d/%m/%Y"),
+                "Festivo": " · ".join(sorted(nombres)),
+            }
+            for fecha, nombres in sorted(festivos_mes.items())
+        ])
+        st.dataframe(festivos_df, width='stretch', hide_index=True)
