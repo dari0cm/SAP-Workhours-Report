@@ -305,9 +305,13 @@ st.divider()
 st.subheader("🧪 Simulación del día actual")
 
 hoy = date.today()
+fichajes_defecto_hoy = [("08:00", "14:00"), ("15:00", "17:00")]
 
 if hoy not in st.session_state["dias"]:
     st.session_state["dias"][hoy] = {"fichajes": [], "festivo": False}
+
+if not st.session_state["dias"][hoy]["fichajes"]:
+    st.session_state["dias"][hoy]["fichajes"] = fichajes_defecto_hoy.copy()
 
 with st.container(border=True):
 
