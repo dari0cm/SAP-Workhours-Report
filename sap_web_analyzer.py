@@ -223,6 +223,10 @@ def parsear_sap(texto):
     mes = None
     dentro = False
 
+    def es_flexible_no_ha_venido(texto_linea):
+        texto_normalizado = texto_linea.lower()
+        return "flexible no ha venido" in texto_normalizado
+
     for linea in lineas:
 
         mes_match = re.search(r"(\d{6})\s+(\d{2}\.\d{2}\.\d{4})", linea)
@@ -256,7 +260,7 @@ def parsear_sap(texto):
                     not re.search(r"\d{2}:\d{2}", linea)
                     and re.search(r"[A-Za-z]", linea)
                 )
-            ):
+            ) and not es_flexible_no_ha_venido(linea):
                 dias[fecha]["festivo"] = True
 
             horas = re.findall(r"(\d{2}:\d{2})\s+(\d{2}:\d{2})", linea)
